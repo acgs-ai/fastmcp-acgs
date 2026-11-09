@@ -1086,7 +1086,7 @@ typing = [
 
 [package.metadata]
 requires-dist = [
-    { name = "acgs-lite", specifier = ">=3.0.1,<4" },
+    { name = "acgs-lite", specifier = ">=3.0.1,<5" },
     { name = "anyio", specifier = ">=4.9.0,<5" },
     { name = "fastmcp-slim", extras = ["server"], specifier = ">=4.1.0,<5" },
     { name = "mcp-types", specifier = ">=2.0.0,<3" },
