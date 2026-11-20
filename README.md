@@ -33,11 +33,36 @@ pip install fastmcp-acgs
 Requires Python 3.10 or later, `fastmcp-slim[server]>=4.1.0,<5` and `acgs-lite>=3.0.1,<5`. It works with the
 `fastmcp` package as well, which installs `fastmcp-slim[server,client]`. FastMCP 2.x and 3.x are not supported.
 
+### Compatibility
+
+| Component | Supported range | 0.2.0 validation |
+|---|---|---|
+| acgs-lite | `>=3.0.1,<5` | 4.0.0 tested via `uv.lock` and the default environment; 3.0.1 floor tested by the CI `test-min` job |
+| fastmcp-slim | `>=4.1.0,<5` | In-process calls and both MCP protocol eras; minimum version tested by CI |
+| Python | `>=3.10` | CI matrix covers 3.10 through 3.14; strict typing targets 3.10 |
+
+The adapter formats arguments as text and calls `GovernanceEngine.validate`. It does not select the production
+authorization profile or issue signed execution receipts. Its formatter renders bytes/bytearray as scalar values
+for rule matching; these are not JSON-native MCP wire arguments.
+
 acgs-lite 4 is a major release. Its production profile of `GovernedCallable` requires an Ed25519
 receipt signer, governed payloads are JSON-only, and `GovernedAgent` no longer passes per-call keyword arguments to
 rule conditions (see the [acgs-lite changelog](https://github.com/acgs-ai/acgs-lite/blob/main/CHANGELOG.md)). This
 adapter works with both majors, but a fresh environment installs the newest version allowed. To stay on 3.x, also
 require `"acgs-lite<4"`, for example `pip install fastmcp-acgs "acgs-lite<4"`.
+
+### Offline deny-and-audit example
+
+Run [examples/deny_and_audit.py](examples/deny_and_audit.py) without an API key or network access:
+
+```bash
+uv run --no-sync python examples/deny_and_audit.py
+```
+
+Scripted requests call a local FastMCP server through its attached `ACGSMiddleware`. Only the allowed note tool
+executes. The example prints an application decision trail (tool, verdict, reason and rule IDs), evaluated
+separately with the same middleware's public `evaluate` API and default rules. The trail omits argument values
+and stays in memory; it is not a signed receipt or a durable engine audit log.
 
 ## Usage
 
