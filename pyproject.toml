@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fastmcp-acgs"
-version = "0.2.0"
+version = "0.3.0"
 description = "ACGS rule-based tool-call governance for FastMCP servers, via middleware"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,11 +27,12 @@ classifiers = [
 ]
 dependencies = [
     "fastmcp-slim[server]>=4.1.0,<5",
-    "acgs-lite>=3.0.1,<5",
-    # Imported directly; all three are already dependencies of fastmcp-slim[server].
+    "acgs-lite>=4.0.0,<5",
+    # Imported directly; all four are already dependencies of fastmcp-slim[server] (jsonschema through mcp).
     "mcp-types>=2.0.0,<3",
     "anyio>=4.9.0,<5",
     "pydantic>=2.12.0,<3",
+    "jsonschema>=4.20.0,<5",
 ]
 
 [project.urls]
@@ -85,7 +86,7 @@ prepare = ["format", "lint", "typecheck", "cov"]
 [tool.hatch.envs.min]
 template = "default"
 python = "3.10"
-extra-dependencies = ["fastmcp-slim[server,client]==4.1.0", "acgs-lite==3.0.1"]
+extra-dependencies = ["fastmcp-slim[server,client]==4.1.0", "acgs-lite==4.0.0"]
 
 [tool.ruff]
 line-length = 120
@@ -116,6 +117,7 @@ ban-relative-imports = "all"
 # Sphinx-style docstrings here.
 "src/fastmcp_acgs/_governance.py" = ["D212", "D205", "D415", "RUF100", "BLE001", "ANN401"]
 "src/fastmcp_acgs/middleware.py" = ["BLE001", "ANN401"]
+"src/fastmcp_acgs/effects.py" = ["BLE001"]  # fail-closed: any provider or store error denies the call
 "tests/**/*.py" = ["D", "S101", "PLR2004", "ANN401", "ARG", "SLF001", "FBT", "PLC0415", "EM101", "N802"]
 "examples/**/*.py" = ["T201", "D", "ARG", "ANN401", "PLR2004", "FBT", "PERF203"]
 
@@ -123,6 +125,11 @@ ban-relative-imports = "all"
 python_version = "3.10"
 strict = true
 files = ["src", "tests", "examples"]
+
+[[tool.mypy.overrides]]
+# jsonschema ships no type information.
+module = ["jsonschema", "jsonschema.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "src"]

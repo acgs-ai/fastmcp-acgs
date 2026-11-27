@@ -30,26 +30,21 @@ The package is a thin adapter over the public `acgs-lite` API.
 pip install fastmcp-acgs
 ```
 
-Requires Python 3.10 or later, `fastmcp-slim[server]>=4.1.0,<5` and `acgs-lite>=3.0.1,<5`. It works with the
+Requires Python 3.10 or later, `fastmcp-slim[server]>=4.1.0,<5` and `acgs-lite>=4.0.0,<5`. It works with the
 `fastmcp` package as well, which installs `fastmcp-slim[server,client]`. FastMCP 2.x and 3.x are not supported.
 
 ### Compatibility
 
-| Component | Supported range | 0.2.0 validation |
+| Component | Supported range | 0.3.0 validation |
 |---|---|---|
-| acgs-lite | `>=3.0.1,<5` | 4.0.0 tested via `uv.lock` and the default environment; 3.0.1 floor tested by the CI `test-min` job |
+| acgs-lite | `>=4.0.0,<5` | 4.0.0 tested via `uv.lock`, the default environment, and the CI `test-min` floor job |
 | fastmcp-slim | `>=4.1.0,<5` | In-process calls and both MCP protocol eras; minimum version tested by CI |
 | Python | `>=3.10` | CI matrix covers 3.10 through 3.14; strict typing targets 3.10 |
 
-The adapter formats arguments as text and calls `GovernanceEngine.validate`. It does not select the production
-authorization profile or issue signed execution receipts. Its formatter renders bytes/bytearray as scalar values
-for rule matching; these are not JSON-native MCP wire arguments.
-
-acgs-lite 4 is a major release. Its production profile of `GovernedCallable` requires an Ed25519
-receipt signer, governed payloads are JSON-only, and `GovernedAgent` no longer passes per-call keyword arguments to
-rule conditions (see the [acgs-lite changelog](https://github.com/acgs-ai/acgs-lite/blob/main/CHANGELOG.md)). This
-adapter works with both majors, but a fresh environment installs the newest version allowed. To stay on 3.x, also
-require `"acgs-lite<4"`, for example `pip install fastmcp-acgs "acgs-lite<4"`.
+Without `effects=`, the adapter formats arguments as text and calls `GovernanceEngine.validate` (no signed execution
+receipts). Its formatter renders bytes/bytearray as scalar values for rule matching; these are not JSON-native MCP
+wire arguments. Pass `ACGSMiddleware(effects=ReceiptedEffects(...))` for contracted, at-most-once tool execution
+with signed v2 decision receipts and signed outcome receipts (see [Receipted effects](#receipted-effects-experimental-requires-acgs-lite--400)).
 
 ### Offline deny-and-audit example
 
@@ -312,6 +307,124 @@ mcp = FastMCP("payments", middleware=[ACGSMiddleware(constitution=constitution, 
 | `on_review` | `"deny"` | `"deny"`, or `"elicit"` (the client's user approves the exact call) |
 | `review_timeout` | `300` | Seconds a reviewer has to approve a call in `"elicit"` mode |
 | `tool_call_formatter` | `format_tool_call` | `(tool_name, arguments) -> str` used as the evaluated text |
+| `effects` | `None` | Optional `ReceiptedEffects` (experimental, see below). `None` keeps the behaviour above |
+
+## Receipted effects (experimental, requires acgs-lite >= 4.0.0)
+
+`fastmcp_acgs.effects` sends the side effect of a governed tool through a provider adapter, at most once, and
+returns signed receipts for it using the `acgs-lite>=4.0.0` provider-contract API (`ProviderContract`,
+`ContractedEffectStore`, `OutcomeReceipt`, `sign_outcome`). `tests/test_receipted_effects.py` runs the setup below
+end to end with a fake provider.
+
+```py
+from acgs_lite.legitimacy import (
+    ContractedEffectStore, Ed25519ReceiptSigner, EffectStore, ProviderContract, ProviderContractClass,
+    ProviderContractRegistry,
+)
+from fastmcp_acgs.effects import EffectBinding, ReceiptedEffects
+
+registry = ProviderContractRegistry()
+registry.register(ProviderContract("payments", ProviderContractClass.FENCEABLE, "1", True, True))
+store = EffectStore("effects.sqlite3")
+store.create_budget("refunds", 1000)
+effects = ReceiptedEffects(
+    ContractedEffectStore(store, registry),
+    Ed25519ReceiptSigner.generate(),
+    budget_id="refunds",
+    bindings={"issue_refund": EffectBinding(payments_provider)},  # your EffectProvider adapter
+    on_outcome=print,
+)
+mcp = FastMCP("shop", middleware=[ACGSMiddleware(effects=effects)])
+```
+
+What happens to a call when `effects` is set, after ACGS allowed it or a reviewer approved it:
+
+- **Bound tool.** The tool body does not run; the provider is the effect channel. The tool is first resolved
+  through FastMCP exactly as a normal call would be: a tool that is unregistered, disabled, or refused by its
+  component `auth=` check is denied before anything is reserved. The arguments must match the tool's input schema
+  (JSON Schema validation of `tool.parameters`), or the call is denied. Every call needs an idempotency key (see
+  [Idempotency keys](#idempotency-keys)), or it is denied.
+  The middleware signs a decision receipt, reserves the effect in the `EffectStore` under a grant identity
+  (sha256 over the authenticated caller, the tool, the exact call and the key) and sends it once. A retry with the
+  same call and key by the same caller maps to the same effect and is not sent again. The same key with different
+  arguments, or from a different authenticated caller, is a different effect. "The call" here is the arguments the
+  caller sent, as the tool would receive them (validated and coerced, key removed; defaults are not added), so
+  `{"quantity": 3}` and `{"quantity": "3"}` are one effect.
+  - On the review path the approval is bound to the digest of the exact call as sent (raw arguments, including an
+    `idempotency_key` argument), while the decision receipt's `allowed_scope` uses the digest of the validated,
+    key-stripped arguments. The two digests differ; auditors correlate an approval with its receipts through the
+    effect key.
+  - Middleware below `ACGSMiddleware` and tool-call interceptors do not run for bound tools: the chain is not
+    continued, because the provider performs the effect instead of the tool body. Put `ACGSMiddleware` innermost
+    if other middleware must see the call.
+  - The caller is the access token's client id and subject (`fastmcp.server.dependencies.get_access_token()`).
+    Unauthenticated callers share one namespace, so their idempotency keys must be globally unique (UUIDv4): two
+    anonymous clients that send the same key and arguments get one effect and the same receipts.
+  - `DONE`: the result's structured content has `effect_key`, `outcome`, `provider_reference` (always `null`: the
+    acgs-lite provider result carries none), `outcome_receipt` (a signed outcome receipt),
+    `decision_receipt_identity` and `decision_receipt` (the signed decision receipt). The bound tool's output schema
+    must accept that object, so declare it as returning `dict[str, Any]`.
+  - `NOT_DONE`: a signed outcome receipt goes to `on_outcome`, and the call fails with `ToolError` naming it.
+  - Outcome unknown (for example a provider timeout): no outcome receipt; the call fails with
+    `outcome unknown; held; reconcile with key <key>`. Nothing is retried automatically. Call
+    `effects.reconcile(key, tool_name)` to settle it through the provider's atomic query-and-fence; it works after a
+    restart, once the provider's contract is registered again.
+  - In flight (a concurrent duplicate while the first send is still running): the call fails with
+    `effect <key> is in flight. Retry later with the same idempotency key.` Do not reconcile an IN_FLIGHT effect
+    while its send may still be running; the fence can turn it into NOT_DONE. Reconcile IN_FLIGHT only after the
+    sending process died.
+  - Receipt pending (the effect is DONE or NOT_DONE, but signing or storing its outcome receipt failed): the call
+    fails with `effect <key> is DONE; its outcome receipt is not available yet`. Retry with the same key, or call
+    `reconcile`, which signs the missing receipt. Never retry such a call with a new key: that sends the effect again.
+  - A missing contract, a non-FENCEABLE contract, an exhausted budget or any store error before dispatch denies the
+    call with `was not executed`. Only calls whose effect was not sent get that wording. Client messages are fixed
+    text; store, signer and provider details go to the server log only.
+- **Unbound tool.** Runs only if its MCP annotations set `readOnlyHint: true`; otherwise, or if the annotations
+  cannot be read, it is denied. Pass `refuse_unbound_side_effects=False` to run unbound tools as before.
+
+### Idempotency keys
+
+A bound call takes its idempotency key from one of two places:
+
+1. The request `_meta` under `acgs/idempotency-key` (`IDEMPOTENCY_KEY_META`). Only clients you control send it:
+   off-the-shelf MCP clients such as Claude Code or Cursor send no custom `_meta`, so with them every bound call
+   is denied unless the tool also declares the argument below.
+2. A tool argument named `idempotency_key` (`IDEMPOTENCY_ARGUMENT`), if the bound tool declares it as
+   `idempotency_key: str`. The model fills it in like any other argument, so it needs no client support beyond
+   calling the tool. Describe it in the tool's docstring, for example "a new UUIDv4 for each distinct action; reuse it
+   only to retry the same action". Declared as a required `str`, the argument must be sent even when `_meta`
+   carries the key, or the arguments are invalid; declare `idempotency_key: str | None = None` to accept either.
+
+The `_meta` key is used if present, else the argument; when both are present they must be equal, or the call is
+denied. If neither is present, the call is denied. The key must be 16 to 128 characters from `A-Z a-z 0-9 _ -` (a UUIDv4 fits);
+anything else is denied, from either source. The argument is validated with the rest of the arguments, then removed:
+it is not part of the call digest, the action reserved in the `EffectStore`, or the request sent to the provider, so
+the same call keyed through `_meta` or through the argument is the same effect, and the key is never provider
+business data. A tool that does not declare `idempotency_key` rejects the argument as invalid (its schema forbids
+extra arguments).
+
+A model-chosen key is only as good as the model's discipline. Different arguments are a different effect whatever
+the key, because the arguments are part of the grant identity. But if the model reuses a key for a second,
+intended-distinct action with the same arguments (two identical refunds, say), the second is deduplicated into the
+first and not sent: that is the at-most-once guarantee working as designed, and it means a key must be fresh for
+every action the user wants performed.
+
+What this does and does not claim:
+
+- At most once holds only for **FENCEABLE** providers, and only if the adapter really deduplicates by effect key
+  and fences atomically. A contract is the host's declaration, not a check of the provider.
+- BOUNDED and UNBOUNDED providers are refused, pending an owner decision on how their unknown outcomes resolve.
+- The `EffectStore` is evidence, not authority. The ACGS decision comes first and is the only authorization.
+- The decision recorded first for an effect key is the one its outcome receipt chains to. The mapping from effect
+  key to decision receipt lives in the `fastmcp_acgs_effect_decisions_v2` table of the store's SQLite file.
+- Outcome receipts reach `on_outcome` at least once, from a worker thread. A receipt counts as delivered only after
+  `on_outcome` returns; if it raises, or the process stops first, the next retry of the call or `reconcile`
+  delivers it again. An exception from `on_outcome` is logged and never fails the call. Sinks must deduplicate by
+  `receipt.identity`.
+- In-process `mcp.call_tool(...)` carries no request `_meta`, so bound tools are denied there unless the tool
+  declares `idempotency_key` and the call passes it as an argument.
+- Off-the-shelf MCP clients (such as Claude Code or Cursor) have not yet been tested end-to-end against bound tools;
+  this README makes no compatibility claim beyond tested in-memory and stdio FastMCP clients.
 
 ## Limitations
 
@@ -334,7 +447,7 @@ mcp = FastMCP("payments", middleware=[ACGSMiddleware(constitution=constitution, 
   and on secrets and personal data (`password`, `api_key`, `sk-...` and `ghp_...` tokens, US SSN
   patterns). It does **not** cover destructive operations such as `rm -rf` or `DROP TABLE`. Write rules for the
   tools you expose. `tests/test_default_constitution.py` lists what the default rules do and do not catch.
-- Keyword rules in acgs-lite 3.0.1 match literal, case-insensitive substrings. They do not understand negation
+- Keyword rules in acgs-lite 4.0.0 match literal, case-insensitive substrings. They do not understand negation
   ("never share the password" matches `password`) and do not treat `-`, `_` and spaces as equivalent
   (`api-key` does not match the keyword `api_key`).
 - Because argument names are part of the evaluated text, a tool with a parameter named `password` is denied
@@ -348,7 +461,7 @@ hatch run format           # ruff format + ruff check --fix
 hatch run lint             # ruff check + ruff format --check
 hatch run typecheck        # mypy --strict
 hatch run cov              # pytest with a 100% branch-coverage gate, network disabled
-hatch run min:cov          # the same tests against fastmcp-slim 4.1.0 and acgs-lite 3.0.1
+hatch run min:cov          # the same tests against fastmcp-slim 4.1.0 and acgs-lite 4.0.0
 pre-commit install         # format, lint, type check and tests on commit; commitizen on commit messages
 ```
 
