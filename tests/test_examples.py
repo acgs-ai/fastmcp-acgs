@@ -102,3 +102,16 @@ def test_every_readme_python_block_runs(capsys: pytest.CaptureFixture[str]) -> N
     assert _middleware(namespaces[0]["mcp"]).on_review == "deny"
     assert _middleware(namespaces[3]["mcp"]).on_review == "elicit"
     assert _middleware(namespaces[-1]["mcp"]).agent_id == "payments-server"
+
+
+def test_receipted_effects_demo_runs_offline(capsys: pytest.CaptureFixture[str]) -> None:
+    runpy.run_path(str(ROOT / "examples" / "receipted_effects_demo.py"), run_name="__main__")
+    lines = capsys.readouterr().out.splitlines()
+    assert lines == [
+        "schema.idempotency_key=True",
+        "allow.outcome=DONE decision_verified=True outcome_verified=True",
+        "retry.provider_sends=1",
+        "timeout.held=True",
+        "reconcile.outcome=DONE verified=True emitted=1",
+        "deny.blocked=True zero_dispatch=True",
+    ]
