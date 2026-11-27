@@ -176,3 +176,25 @@ async def test_decisions_are_logged(caplog: pytest.LogCaptureFixture, mode: str)
             await client.call_tool("send_email", LEAK)
     assert any("send_email" in record.getMessage() and "ACGS-006" in record.getMessage() for record in caplog.records)
     assert all("hunter2" not in record.getMessage() for record in caplog.records)
+
+
+class RecordingEffects:
+    """A duck-typed stand-in for ReceiptedEffects to test the middleware dispatch seam."""
+
+    def __init__(self) -> None:
+        self.seen: list[tuple[str, Verdict, bool]] = []
+
+    async def execute(self, context: Any, call_next: Any, decision: GovernanceDecision, **kwargs: Any) -> Any:
+        self.seen.append((context.message.name, decision.verdict, kwargs["reviewed"]))
+        return await call_next(context)
+
+
+async def test_allowed_calls_are_handed_to_the_effects_dispatcher(mode: str) -> None:
+    ran = Ran()
+    effects: Any = RecordingEffects()
+    async with Client(governed(ran, effects=effects), mode=mode) as client:
+        result = await client.call_tool("get_weather", WEATHER)
+        with pytest.raises(ToolError, match="ACGS-006"):
+            await client.call_tool("send_email", LEAK)
+    assert result.data == "Sunny in Paris"
+    assert effects.seen == [("get_weather", Verdict.ALLOW, False)]  # a denied call never reaches it

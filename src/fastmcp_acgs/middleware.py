@@ -10,7 +10,7 @@ import json
 import logging
 import math
 import time
-from typing import Any, Literal, get_args
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 import anyio
 import mcp_types
@@ -23,6 +23,9 @@ from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from fastmcp_acgs._governance import GovernanceDecision, ToolCallFormatter, ToolCallGovernor, Verdict
+
+if TYPE_CHECKING:
+    from fastmcp_acgs.effects import ReceiptedEffects
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +106,7 @@ class ACGSMiddleware(Middleware):
         >>> mcp = FastMCP("demo", middleware=[ACGSMiddleware()])
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         constitution: Constitution | None = None,
         *,
@@ -111,6 +114,7 @@ class ACGSMiddleware(Middleware):
         on_review: OnReview = "deny",
         review_timeout: float = 300.0,
         tool_call_formatter: ToolCallFormatter | None = None,
+        effects: ReceiptedEffects | None = None,
     ) -> None:
         """Create the middleware.
 
@@ -121,6 +125,9 @@ class ACGSMiddleware(Middleware):
                 approve the exact call through MCP elicitation; anything but an explicit approval denies it.
             review_timeout: Seconds a reviewer has to approve a call in ``"elicit"`` mode.
             tool_call_formatter: Optional ``(tool_name, arguments) -> str`` replacing ``format_tool_call``.
+            effects: Optional :class:`fastmcp_acgs.effects.ReceiptedEffects` (experimental). When set, allowed and
+                approved calls to bound tools are sent once through their provider contract instead of running the
+                tool body, and unbound tools run only if they are read-only. When None, calls run as before.
 
         Raises:
             ValueError: If ``on_review`` or ``review_timeout`` is invalid.
@@ -139,6 +146,7 @@ class ACGSMiddleware(Middleware):
         self.agent_id = agent_id
         self.on_review: OnReview = on_review
         self.review_timeout = float(review_timeout)
+        self.effects = effects
 
     def __repr__(self) -> str:
         """Describe the middleware without its rules."""
@@ -178,7 +186,7 @@ class ACGSMiddleware(Middleware):
 
         decision = self._governor.evaluate(tool_name, arguments)
         if decision.verdict is Verdict.ALLOW:
-            return await call_next(context)
+            return await self._run(context, call_next, decision, reviewed=False)
         if decision.verdict is Verdict.REVIEW and self.on_review == "elicit":
             return await self._review(context, call_next, decision, tool_name, arguments)
         reason = decision.reason if decision.verdict is Verdict.DENY else f"{decision.reason} {_NO_REVIEWER}"
@@ -214,7 +222,26 @@ class ACGSMiddleware(Middleware):
             logger.info("ACGS review denied tool '%s': %s", tool_name, denial.reason)
             raise _denied(tool_name, denial.reason)
         logger.info("ACGS review approved tool '%s' (rules: %s).", tool_name, ", ".join(decision.rule_ids))
-        return await call_next(context)
+        return await self._run(context, call_next, decision, reviewed=True)
+
+    async def _run(
+        self,
+        context: MiddlewareContext[mcp_types.CallToolRequestParams],
+        call_next: CallNext[mcp_types.CallToolRequestParams, ToolResult],
+        decision: GovernanceDecision,
+        *,
+        reviewed: bool,
+    ) -> ToolResult:
+        """Run an allowed or approved call: unchanged, or through the receipted effects when configured."""
+        if self.effects is None:
+            return await call_next(context)
+        return await self.effects.execute(
+            context,
+            call_next,
+            decision,
+            constitution=self.constitution,
+            reviewed=reviewed,
+        )
 
     async def _elicit(self, ctx: Context, decision: GovernanceDecision) -> str | None:
         """Ask over the session back-channel (handshake-era connections). Returns a denial reason or None."""
