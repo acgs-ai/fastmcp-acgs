@@ -337,6 +337,22 @@ effects = ReceiptedEffects(
 mcp = FastMCP("shop", middleware=[ACGSMiddleware(effects=effects)])
 ```
 
+### Offline receipted-effects pilot demo
+
+Run [examples/receipted_effects_demo.py](examples/receipted_effects_demo.py) offline with an in-memory FastMCP
+`Client(mcp)` and a simulated `FENCEABLE` refund provider (no API keys or network calls):
+
+```bash
+uv run --no-sync python examples/receipted_effects_demo.py
+```
+
+The demo walks through four scenarios:
+1. Allowed refund execution returning chained signed v2 decision and outcome receipts verified offline.
+2. Duplicate retry with the same `idempotency_key` returning the cached outcome with zero extra provider sends.
+3. Simulated provider timeout held in `UNKNOWN` across an SQLite `EffectStore` restart and reconciled via
+   `ReceiptedEffects.reconcile`.
+4. Constitutional rule denial (`DEMO-NO-SECRET`) blocking `record_note` before any provider dispatch.
+
 What happens to a call when `effects` is set, after ACGS allowed it or a reviewer approved it:
 
 - **Bound tool.** The tool body does not run; the provider is the effect channel. The tool is first resolved
